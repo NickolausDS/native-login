@@ -2,7 +2,7 @@ import json
 import pytest
 
 from fair_research_login.token_storage import (
-    check_expired, check_scopes, flat_pack, flat_unpack, verify_token_group
+    check_expired, check_scopes, flat_pack, flat_unpack, verify_token_group,
 )
 from fair_research_login.exc import (
     TokensExpired, ScopesMismatch, InvalidTokenFormat

@@ -1,14 +1,19 @@
 import time
 import copy
 import sys
+import re
+import logging
 
 from fair_research_login.exc import (TokensExpired, ScopesMismatch,
                                      InvalidTokenFormat)
 
 string_types = str if sys.version_info.major == 3 else basestring  # noqa
 
+log = logging.getLogger(__name__)
+
 TOKEN_GROUP_KEYS = {'access_token', 'refresh_token', 'expires_at_seconds',
-                    'scope', 'token_type', 'resource_server'}
+                    'scope', 'token_type', 'resource_server',
+                    'dynamic_dependencies'}
 REQUIRED_TOKEN_KEYS = {'access_token', 'expires_at_seconds', 'scope',
                        'resource_server'}
 
@@ -24,9 +29,40 @@ def check_expired(tokens):
     For all tokens in that group that are expired. Ignores whether there
     is a refresh token attached to that token.
     """
+    log.debug('Checking for expired tokens {}'.format(tokens.keys()))
     expired = [rs for rs, tset in tokens.items() if is_expired(tset)]
     if expired:
         raise TokensExpired(resource_servers=expired)
+
+
+def tokens_by_scope(tokens):
+    tkns_by_scope = {}
+    for token_group in tokens.values():
+        for scope in token_group['scope'].split():
+            tkns_by_scope[scope] = token_group
+    return tkns_by_scope
+
+
+def normalize_scope_string(requested_scopes):
+    if isinstance(requested_scopes, str):
+        return requested_scopes
+    return ' '.join(requested_scopes)
+
+
+def get_dynamic_dependencies(scope_string):
+    scope_pattern = r'([\w:./\-]+)(\[[\w:./\- ]+\])?'
+    n_scope_string = normalize_scope_string(scope_string)
+    parsed_scopes = re.findall(scope_pattern, n_scope_string)
+    dynamic_dependencies = {}
+    for scope, dependencies in parsed_scopes:
+        deps = dependencies.lstrip('[').rstrip(']')
+        deps = ' '.join(sorted(deps.split()))
+        dynamic_dependencies[scope] = deps
+    return dynamic_dependencies
+
+
+def get_optional_scopes(requested_scopes):
+    raise NotImplementedError()
 
 
 def get_scopes(tokens):
@@ -39,7 +75,10 @@ def get_scopes(tokens):
 
 def check_scopes(tokens, requested_scopes):
     """
-    Returns true if scopes match the tokens passed in, false otherwise.
+    Returns true if scopes match the tokens passed in. Raises ScopeMismatch
+    exception if requested scopes are not sufficient for the given grouping
+    of tokens. If tokens have scopes which exceed the requested_scopes, no
+    exceptions will be raised.
     **Parameters**
       ``tokens`` (**dict**)
       A token grouping, organized by:
@@ -55,12 +94,35 @@ def check_scopes(tokens, requested_scopes):
                 'resource_server': 'auth.globus.org'
             }, ...
         }
+      ``requested_scopes`` (**str** or **iterable of strings**)
+      A scope string or list of scopes. Examples include:
+        'openid profile email'
+        ['openid', 'profile', 'email']
+      Dynamic Dependencies are also supported:
+        'my_custom_scope[openid profile]'
+
     """
-    loaded_scopes = get_scopes(tokens)
-    diff = set(requested_scopes).difference(set(loaded_scopes))
+    dynamic_deps = get_dynamic_dependencies(requested_scopes)
+    base_requested_scopes = set(dynamic_deps.keys())
+    token_scopes = get_scopes(tokens)
+    log.debug('Checking loaded scopes meet requested scopes: {}'
+              ''.format(base_requested_scopes))
+    diff = set(base_requested_scopes).difference(set(token_scopes))
     if diff:
-        raise ScopesMismatch('Loaded Scopes missing Requested Scopes {}'
+        raise ScopesMismatch('Loaded scopes missing Requested Scopes {}'
                              ''.format(diff))
+    log.debug('Checking loaded scopes meet Dynamic Dependencies: {}'
+              ''.format({k: v for k, v in dynamic_deps.items() if v}))
+    tkns_by_scope = tokens_by_scope(tokens)
+    for scope, dependency in dynamic_deps.items():
+        requested_dependency_set = set(dependency.split())
+        tdd = tkns_by_scope.get(scope, {}).get('dynamic_dependencies', '')
+        token_dependency_set = set(tdd.split())
+        diff = set(requested_dependency_set).difference(token_dependency_set)
+        if diff:
+            raise ScopesMismatch('Loaded Scope {} missing dynamic dependency '
+                                 '{}'.format(scope, diff))
+    log.debug('Token scopes are valid, all checks pass.')
 
 
 def verify_token_group(tokens):
@@ -180,9 +242,9 @@ def flat_pack(tokens, name_key=default_name_key):
     }"""
 
     flattened_items = {}
-    for token_set in tokens.values():
+    for token_name, token_set in tokens.items():
         for key, value in token_set.items():
-            key_name = name_key(token_set['resource_server'], key)
+            key_name = name_key(token_name, key)
             if isinstance(value, int):
                 value = str(value)
             if value is None:

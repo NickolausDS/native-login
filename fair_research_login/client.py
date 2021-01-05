@@ -7,7 +7,8 @@ from fair_research_login.code_handler import InputCodeHandler
 from fair_research_login.local_server import LocalServerCodeHandler
 from fair_research_login.token_storage import (
     MultiClientTokenStorage, check_expired, check_scopes, is_expired,
-    verify_token_group, TOKEN_GROUP_KEYS, get_scopes
+    verify_token_group, TOKEN_GROUP_KEYS, get_scopes,
+    get_dynamic_dependencies,
 )
 from fair_research_login.exc import (
     LoadError, TokensExpired, TokenStorageDisabled, NoSavedTokens, AuthFailure
@@ -158,11 +159,21 @@ class NativeClient(object):
                                   prefill_named_grant, additional_params,
                                   **kwargs)
         token_response = self.client.oauth2_exchange_code_for_tokens(auth_code)
+        tokens = token_response.by_resource_server
+        dynamic_deps = get_dynamic_dependencies(requested_scopes)
+        # optional_scopes = get_optional_scopes(requested_scopes)
+        for token_group in tokens.values():
+            for root_scope, deps in dynamic_deps.items():
+                if root_scope in token_group['scope'] and deps:
+                    existing_deps = token_group.get('dynamic_dependencies', '')
+                    all_deps = existing_deps.split() + deps.split()
+                    all_deps_str = ' '.join(sorted(all_deps))
+                    token_group['dynamic_dependencies'] = all_deps_str
         try:
-            self.save_tokens(token_response.by_resource_server)
+            self.save_tokens(tokens)
         except LoadError:
             pass
-        return token_response.by_resource_server
+        return tokens
 
     def get_code(self, requested_scopes, refresh_tokens, prefill_named_grant,
                  additional_params, **kwargs):
@@ -308,14 +319,11 @@ class NativeClient(object):
             raise NoSavedTokens('No tokens were loaded')
 
         if requested_scopes:
-            # Support both string and list for requested scope. But ensure
-            # it is a list.
-            if isinstance(requested_scopes, str):
-                requested_scopes = requested_scopes.split(' ')
-            requested_scopes = set(requested_scopes)
+            dynamic_deps = get_dynamic_dependencies(requested_scopes)
+            base_req_scopes = set(dynamic_deps.keys())
             # Ensure only requested tokens are used.
             tokens = {rs: ts for rs, ts in tokens.items()
-                      if requested_scopes.intersection(ts['scope'].split())}
+                      if base_req_scopes.intersection(ts['scope'].split())}
             # Ensure all requested tokens are present.
             check_scopes(tokens, requested_scopes)
 

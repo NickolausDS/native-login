@@ -397,5 +397,27 @@ def test_non_requested_token_does_not_cancel_load(mem_storage, mock_tokens,
     # should not raise
     cli.load_tokens(requested_scopes=good)
     cli.load_tokens()
+    # Should raise
     with pytest.raises(TokensExpired):
         cli.load_tokens(requested_scopes=exp)
+
+
+def test_load_with_matching_ddeps(mem_storage, mock_tokens):
+    mock_tokens['resource.server.org']['dynamic_dependencies'] = 'foo bar'
+    cli = NativeClient(client_id=str(uuid4()), token_storage=mem_storage)
+
+    mem_storage.tokens = mock_tokens
+
+    # should not raise
+    load = cli.load_tokens(requested_scopes=['custom_scope[foo bar]'])
+    assert 'resource.server.org' in load.keys()
+    cli.load_tokens()
+
+
+def test_load_with_missing_ddeps(mem_storage, mock_tokens):
+    cli = NativeClient(client_id=str(uuid4()), token_storage=mem_storage)
+    mem_storage.tokens = mock_tokens
+    from pprint import pprint
+    pprint(mock_tokens)
+    with pytest.raises(ScopesMismatch):
+        cli.load_tokens(requested_scopes=['custom_scope[foo bar]'])
